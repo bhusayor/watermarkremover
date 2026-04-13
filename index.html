@@ -1,0 +1,594 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Gemini Watermark Remover</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Fraunces:ital,opsz,wght@0,9..144,400;0,9..144,600;1,9..144,400&display=swap" rel="stylesheet" />
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg: #0e0e0f;
+      --bg2: #161618;
+      --bg3: #1e1e21;
+      --border: rgba(255,255,255,0.08);
+      --border2: rgba(255,255,255,0.14);
+      --text: #f0ede8;
+      --muted: #8a8780;
+      --hint: #4a4946;
+      --green: #1D9E75;
+      --green-light: #E1F5EE;
+      --green-dark: #0F6E56;
+      --blue: #378ADD;
+      --blue-light: #E6F1FB;
+      --blue-dark: #185FA5;
+      --red: #E24B4A;
+      --radius-sm: 6px;
+      --radius-md: 10px;
+      --radius-lg: 14px;
+      --mono: 'DM Mono', monospace;
+      --serif: 'Fraunces', serif;
+    }
+
+    html { background: var(--bg); color: var(--text); font-family: var(--mono); min-height: 100vh; }
+
+    body {
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 3rem 1.25rem 4rem;
+    }
+
+    /* noise texture overlay */
+    body::before {
+      content: '';
+      position: fixed;
+      inset: 0;
+      background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noise'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noise)' opacity='0.04'/%3E%3C/svg%3E");
+      pointer-events: none;
+      z-index: 0;
+      opacity: .5;
+    }
+
+    .wrap { position: relative; z-index: 1; width: 100%; max-width: 720px; }
+
+    header { margin-bottom: 2.5rem; }
+    .logo-row { display: flex; align-items: center; gap: 10px; margin-bottom: 6px; }
+    .logo-icon {
+      width: 36px; height: 36px; border-radius: var(--radius-sm);
+      background: var(--green-dark); display: flex; align-items: center; justify-content: center;
+    }
+    .logo-icon svg { width: 18px; height: 18px; color: var(--green-light); }
+    h1 { font-family: var(--serif); font-size: 26px; font-weight: 600; letter-spacing: -.02em; color: var(--text); }
+    .tagline { font-size: 12px; color: var(--muted); letter-spacing: .03em; line-height: 1.6; }
+    .pill {
+      display: inline-flex; align-items: center; gap: 5px;
+      background: rgba(29,158,117,.12); border: 0.5px solid rgba(29,158,117,.3);
+      border-radius: 20px; padding: 3px 10px; font-size: 11px; color: var(--green);
+      margin-top: 10px;
+    }
+    .pill::before { content: ''; width: 6px; height: 6px; border-radius: 50%; background: var(--green); }
+
+    /* dropzone */
+    #dropzone {
+      border: 1.5px dashed var(--border2);
+      border-radius: var(--radius-lg);
+      padding: 2.25rem 1.5rem;
+      text-align: center;
+      cursor: pointer;
+      background: var(--bg2);
+      transition: border-color .2s, background .2s;
+      position: relative;
+    }
+    #dropzone.drag-over { border-color: var(--green); background: rgba(29,158,117,.06); }
+    #dropzone:hover { border-color: var(--border2); background: var(--bg3); }
+    #dropzone input { display: none; }
+    .dz-icon {
+      width: 52px; height: 52px; margin: 0 auto 14px;
+      border-radius: var(--radius-md);
+      background: var(--bg3);
+      border: 0.5px solid var(--border2);
+      display: flex; align-items: center; justify-content: center;
+    }
+    .dz-icon svg { width: 22px; height: 22px; color: var(--muted); }
+    .dz-title { font-size: 14px; font-weight: 500; color: var(--text); margin-bottom: 4px; }
+    .dz-sub { font-size: 12px; color: var(--muted); }
+
+    /* options bar */
+    .opts {
+      display: flex; gap: 16px; flex-wrap: wrap; align-items: center;
+      padding: 14px 0; border-bottom: 0.5px solid var(--border);
+      margin-top: 1.5rem;
+    }
+    .opt-group { display: flex; align-items: center; gap: 8px; }
+    .opt-label { font-size: 12px; color: var(--muted); }
+    select {
+      font-family: var(--mono); font-size: 12px;
+      padding: 5px 10px; border-radius: var(--radius-sm);
+      border: 0.5px solid var(--border2);
+      background: var(--bg3); color: var(--text);
+      cursor: pointer; outline: none; appearance: none;
+      -webkit-appearance: none;
+      background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%238a8780' stroke-width='2'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E");
+      background-repeat: no-repeat; background-position: right 8px center;
+      padding-right: 28px;
+    }
+    input[type=range] {
+      -webkit-appearance: none; appearance: none;
+      width: 100px; height: 4px;
+      background: var(--bg3); border-radius: 2px; outline: none; cursor: pointer;
+    }
+    input[type=range]::-webkit-slider-thumb {
+      -webkit-appearance: none; width: 16px; height: 16px;
+      border-radius: 50%; background: var(--green);
+      border: 2px solid var(--bg); cursor: pointer;
+    }
+    input[type=range]::-moz-range-thumb {
+      width: 16px; height: 16px; border-radius: 50%;
+      background: var(--green); border: 2px solid var(--bg); cursor: pointer;
+    }
+    .range-val { font-size: 12px; color: var(--text); min-width: 22px; }
+
+    /* queue */
+    #queue { margin-top: 1.25rem; display: none; }
+    .q-header {
+      display: flex; align-items: center; justify-content: space-between;
+      margin-bottom: 8px;
+    }
+    .q-title { font-size: 13px; font-weight: 500; color: var(--text); }
+    .q-count { font-size: 12px; color: var(--muted); }
+
+    .file-list {
+      border: 0.5px solid var(--border);
+      border-radius: var(--radius-md);
+      overflow: hidden;
+    }
+    .frow {
+      display: grid;
+      grid-template-columns: minmax(0,1fr) 72px 94px 30px;
+      align-items: center; gap: 10px;
+      padding: 8px 12px 0;
+      border-bottom: 0.5px solid var(--border);
+      font-size: 12px;
+      transition: background .1s;
+    }
+    .frow:last-child { border-bottom: none; }
+    .frow:hover { background: var(--bg2); }
+    .fname { color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .fsize { color: var(--hint); text-align: right; }
+    .fstatus {
+      text-align: center; font-size: 11px;
+      padding: 3px 8px; border-radius: 20px; font-weight: 500;
+      white-space: nowrap;
+    }
+    .s-wait  { background: rgba(255,255,255,.05); color: var(--muted); }
+    .s-proc  { background: rgba(55,138,221,.15); color: #85B7EB; }
+    .s-done  { background: rgba(29,158,117,.15); color: #5DCAA5; }
+    .s-err   { background: rgba(226,75,74,.15);  color: #F09595; }
+    .fdel {
+      background: none; border: none; cursor: pointer;
+      color: var(--hint); font-size: 16px; line-height: 1;
+      display: flex; align-items: center; justify-content: center;
+      border-radius: var(--radius-sm); padding: 2px;
+      transition: color .15s, background .15s;
+    }
+    .fdel:hover { color: var(--red); background: rgba(226,75,74,.1); }
+    .frow { flex-wrap: wrap; }
+    .frow-bar { grid-column: 1 / -1; width: 100%; display: none; padding-bottom: 5px; }
+    .frow-bar.visible { display: block; }
+    .mini-track { height: 2px; background: rgba(255,255,255,.07); border-radius: 1px; overflow: hidden; }
+    .mini-fill { height: 100%; width: 0%; background: #378ADD; border-radius: 1px; transition: width .08s linear; }
+
+    /* actions */
+    .actions { display: flex; gap: 8px; margin-top: 12px; flex-wrap: wrap; align-items: center; }
+
+    button {
+      font-family: var(--mono); font-size: 12px;
+      padding: 8px 16px; border-radius: var(--radius-sm); cursor: pointer;
+      border: 0.5px solid var(--border2);
+      background: var(--bg3); color: var(--text);
+      transition: background .15s, border-color .15s, transform .1s;
+      white-space: nowrap;
+    }
+    button:hover:not(:disabled) { background: var(--bg2); border-color: var(--border2); }
+    button:active:not(:disabled) { transform: scale(.98); }
+    button:disabled { opacity: .35; cursor: default; }
+    #btn-run {
+      background: var(--green-dark); color: var(--green-light);
+      border-color: var(--green-dark);
+    }
+    #btn-run:hover:not(:disabled) { background: #0b5a43; }
+    #btn-zip {
+      background: var(--blue-dark); color: var(--blue-light);
+      border-color: var(--blue-dark);
+    }
+    #btn-zip:hover:not(:disabled) { background: #0c447c; }
+
+    /* progress */
+    .progress-wrap { margin-top: 10px; display: none; }
+    .progress-track {
+      height: 3px; background: var(--bg3); border-radius: 2px; overflow: hidden;
+    }
+    .progress-fill { height: 100%; width: 0; background: var(--green); transition: width .15s; border-radius: 2px; }
+    #summary { font-size: 12px; color: var(--muted); margin-top: 7px; min-height: 18px; }
+
+    /* footer */
+    footer {
+      margin-top: 3rem; font-size: 11px; color: var(--hint);
+      text-align: center; letter-spacing: .02em; line-height: 1.8;
+    }
+
+    @media(max-width: 520px) {
+      body { padding: 2rem 1rem 3rem; }
+      h1 { font-size: 22px; }
+      .frow { grid-template-columns: minmax(0,1fr) 60px 80px 26px; gap: 6px; padding: 7px 10px; }
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <header>
+      <div class="logo-row">
+        <div class="logo-icon">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/>
+          </svg>
+        </div>
+        <h1>Watermark Eraser</h1>
+      </div>
+      <p class="tagline">Remove Gemini watermarks from images — batch mode, client-side only.</p>
+      <div class="pill">no login &nbsp;&middot;&nbsp; no upload &nbsp;&middot;&nbsp; 100% private</div>
+    </header>
+
+    <!-- Drop zone -->
+    <div id="dropzone"
+      onclick="document.getElementById('fin').click()"
+      ondragover="onDragOver(event)"
+      ondragleave="onDragLeave(event)"
+      ondrop="onDrop(event)">
+      <div class="dz-icon">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+          <polyline points="17 8 12 3 7 8"/>
+          <line x1="12" y1="3" x2="12" y2="15"/>
+        </svg>
+      </div>
+      <div class="dz-title">Drop images here or click to browse</div>
+      <div class="dz-sub">PNG, JPG, WEBP &mdash; select multiple files at once</div>
+      <input type="file" id="fin" accept="image/*" multiple onchange="addFiles(this.files)">
+    </div>
+
+    <!-- Options -->
+    <div class="opts">
+      <div class="opt-group">
+        <span class="opt-label">method</span>
+        <select id="method">
+          <option value="auto">auto-detect</option>
+          <option value="br">bottom-right</option>
+          <option value="bl">bottom-left</option>
+          <option value="tr">top-right</option>
+          <option value="tl">top-left</option>
+          <option value="full">full scan</option>
+        </select>
+      </div>
+      <div class="opt-group">
+        <span class="opt-label">sensitivity</span>
+        <input type="range" id="thresh" min="5" max="80" value="30" step="1"
+          oninput="document.getElementById('thresh-val').textContent=this.value">
+        <span class="range-val" id="thresh-val">30</span>
+      </div>
+    </div>
+
+    <!-- Queue -->
+    <div id="queue">
+      <div class="q-header">
+        <span class="q-title">queue</span>
+        <span class="q-count" id="q-count">0 files</span>
+      </div>
+      <div class="file-list" id="file-list"></div>
+      <div class="actions">
+        <button id="btn-run" onclick="runAll()">
+          <svg style="width:13px;height:13px;display:inline;vertical-align:-2px;margin-right:5px" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+          process all
+        </button>
+        <button id="btn-zip" onclick="downloadZip()" disabled>
+          <svg style="width:13px;height:13px;display:inline;vertical-align:-2px;margin-right:5px" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+          download ZIP
+        </button>
+        <button onclick="clearAll()">clear all</button>
+      </div>
+      <div class="progress-wrap" id="progress-wrap">
+        <div class="progress-track"><div class="progress-fill" id="pfill"></div></div>
+      </div>
+      <div id="summary"></div>
+    </div>
+
+    <footer>
+      all processing happens in your browser &mdash; no data is ever sent to a server<br>
+      files are downloaded with their original names, saved as PNG
+    </footer>
+  </div>
+
+  <script>
+    const files = [];
+    const results = {};
+    const blobs = {};
+    const fileProgress = {};
+    let fileCounter = 0;
+    let currentFileIndex = 0;
+    let totalFiles = 0;
+
+    function esc(s) {
+      return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+    }
+    function fmtSize(b) {
+      if (b < 1024) return b + 'B';
+      if (b < 1048576) return Math.round(b / 1024) + 'KB';
+      return (b / 1048576).toFixed(1) + 'MB';
+    }
+    function key(f) { return f.__uid; }
+    function yield_() { return new Promise(r => setTimeout(r, 0)); }
+
+    function updateFileProgress(k, pct) {
+      fileProgress[k] = pct;
+      const mf  = document.getElementById('mf-' + k);
+      const st  = document.getElementById('st-' + k);
+      const bar = document.getElementById('bar-' + k);
+      if (mf)  mf.style.width = pct + '%';
+      if (st)  st.textContent = pct + '%';
+      if (bar) bar.classList.add('visible');
+      const overall = Math.round(((currentFileIndex + pct / 100) / totalFiles) * 100);
+      const pfill = document.getElementById('pfill');
+      if (pfill) pfill.style.width = overall + '%';
+    }
+
+    /* drag events */
+    function onDragOver(e) {
+      e.preventDefault();
+      document.getElementById('dropzone').classList.add('drag-over');
+    }
+    function onDragLeave(e) {
+      document.getElementById('dropzone').classList.remove('drag-over');
+    }
+    function onDrop(e) {
+      e.preventDefault();
+      document.getElementById('dropzone').classList.remove('drag-over');
+      const f = [...e.dataTransfer.files].filter(f => f.type.startsWith('image/'));
+      if (f.length) addFiles(f);
+    }
+
+    function addFiles(fileList) {
+      [...fileList].forEach(f => {
+        if (!f.type.startsWith('image/')) return;
+        if (files.find(x => x.name === f.name && x.size === f.size)) return;
+        f.__uid = 'f' + (++fileCounter);
+        files.push(f);
+      });
+      renderList();
+      document.getElementById('queue').style.display = 'block';
+      document.getElementById('fin').value = '';
+    }
+
+    function renderList() {
+      const list = document.getElementById('file-list');
+      document.getElementById('q-count').textContent = files.length + ' file' + (files.length === 1 ? '' : 's');
+      list.innerHTML = '';
+      files.forEach((f, i) => {
+        const r = results[key(f)];
+        const pct = fileProgress[key(f)] || 0;
+        const isProc = r === 'processing';
+        const cls = isProc ? 's-proc' : r === 'done' ? 's-done' : r === 'error' ? 's-err' : 's-wait';
+        const lbl = isProc ? (pct + '%') : r === 'done' ? 'done' : r === 'error' ? 'error' : 'waiting';
+        const row = document.createElement('div');
+        row.className = 'frow';
+        row.id = 'row-' + key(f);
+        row.innerHTML = `
+          <span class="fname" title="${esc(f.name)}">${esc(f.name)}</span>
+          <span class="fsize">${fmtSize(f.size)}</span>
+          <span class="fstatus ${cls}" id="st-${key(f)}">${lbl}</span>
+          <button class="fdel" onclick="removeFile(${i})" title="remove" ${isProc ? 'disabled' : ''}>&#x2715;</button>
+          <div class="frow-bar${isProc ? ' visible' : ''}" id="bar-${key(f)}" style="grid-column:1/-1;padding:4px 0 6px">
+            <div class="mini-track"><div class="mini-fill" id="mf-${key(f)}" style="width:${pct}%"></div></div>
+          </div>
+        `;
+        list.appendChild(row);
+      });
+    }
+
+    function removeFile(i) {
+      const f = files[i];
+      delete results[key(f)];
+      delete blobs[key(f)];
+      files.splice(i, 1);
+      renderList();
+      if (!files.length) document.getElementById('queue').style.display = 'none';
+    }
+
+    function clearAll() {
+      files.length = 0;
+      Object.keys(results).forEach(k => delete results[k]);
+      Object.keys(blobs).forEach(k => delete blobs[k]);
+      Object.keys(fileProgress).forEach(k => delete fileProgress[k]);
+      document.getElementById('queue').style.display = 'none';
+      document.getElementById('btn-zip').disabled = true;
+      document.getElementById('summary').textContent = '';
+      document.getElementById('progress-wrap').style.display = 'none';
+      document.getElementById('pfill').style.width = '0%';
+    }
+
+    function processFile(file, thresh, method, onProgress) {
+      return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onerror = () => reject(new Error('read failed'));
+        reader.onload = e => {
+          const img = new Image();
+          img.onerror = () => reject(new Error('image load failed'));
+          img.onload = async () => {
+            try {
+              const MAX = 1800;
+              let w = img.width, h = img.height;
+              if (w > MAX) { const r = MAX / w; w = MAX; h = Math.round(h * r); }
+              const c = document.createElement('canvas');
+              c.width = w; c.height = h;
+              const ctx = c.getContext('2d');
+              ctx.drawImage(img, 0, 0, w, h);
+              const imgData = ctx.getImageData(0, 0, w, h);
+              const data = imgData.data;
+
+              const regions = [];
+              if (method === 'auto' || method === 'br') regions.push([Math.floor(w*.5), Math.floor(h*.75), w, h]);
+              if (method === 'auto' || method === 'bl') regions.push([0, Math.floor(h*.75), Math.floor(w*.5), h]);
+              if (method === 'auto' || method === 'tr') regions.push([Math.floor(w*.5), 0, w, Math.floor(h*.25)]);
+              if (method === 'auto' || method === 'tl') regions.push([0, 0, Math.floor(w*.5), Math.floor(h*.25)]);
+              if (method === 'full') regions.push([0, 0, w, h]);
+
+              const totalRows = regions.reduce((s,[,y0,,y1])=>s+(y1-y0),0) * 2;
+              let rowsDone = 0;
+
+              for (const [x0, y0, x1, y1] of regions) {
+                const mask = new Uint8Array(w * h);
+                for (let y = y0; y < y1; y++) {
+                  if (y % 50 === 0) { await yield_(); onProgress && onProgress(Math.min(99, Math.round(rowsDone/totalRows*100))); }
+                  for (let x = x0; x < x1; x++) {
+                    const idx = (y * w + x) * 4;
+                    const r = data[idx], g = data[idx+1], b = data[idx+2], a = data[idx+3];
+                    if (a < 200) continue;
+                    const bright = (r + g + b) / 3;
+                    const diff = Math.max(Math.abs(r-g), Math.abs(g-b), Math.abs(r-b));
+                    if (bright > 255 - thresh && diff < thresh) mask[y * w + x] = 1;
+                  }
+                  rowsDone++;
+                }
+
+                const mask2 = new Uint8Array(mask);
+                const rad = 3;
+                for (let y = y0; y < y1; y++) {
+                  for (let x = x0; x < x1; x++) {
+                    if (!mask[y * w + x]) continue;
+                    for (let dy = -rad; dy <= rad; dy++) {
+                      for (let dx = -rad; dx <= rad; dx++) {
+                        const ny = y + dy, nx = x + dx;
+                        if (ny >= 0 && ny < h && nx >= 0 && nx < w) mask2[ny * w + nx] = 1;
+                      }
+                    }
+                  }
+                }
+
+                const sr = Math.max(1, Math.min(20, Math.floor(thresh / 3)));
+                for (let y = y0; y < y1; y++) {
+                  if (y % 50 === 0) { await yield_(); onProgress && onProgress(Math.min(99, Math.round(rowsDone/totalRows*100))); }
+                  for (let x = x0; x < x1; x++) {
+                    if (!mask2[y * w + x]) continue;
+                    let rS = 0, gS = 0, bS = 0, cnt = 0;
+                    for (let dy = -sr; dy <= sr; dy++) {
+                      for (let dx = -sr; dx <= sr; dx++) {
+                        const ny = y + dy, nx = x + dx;
+                        if (ny < 0 || ny >= h || nx < 0 || nx >= w || mask2[ny * w + nx]) continue;
+                        const ni = (ny * w + nx) * 4;
+                        rS += data[ni]; gS += data[ni+1]; bS += data[ni+2]; cnt++;
+                      }
+                    }
+                    if (cnt) {
+                      const idx = (y * w + x) * 4;
+                      data[idx]   = Math.round(rS / cnt);
+                      data[idx+1] = Math.round(gS / cnt);
+                      data[idx+2] = Math.round(bS / cnt);
+                    }
+                  }
+                  rowsDone++;
+                }
+              }
+
+              onProgress && onProgress(100);
+              ctx.putImageData(imgData, 0, 0);
+              c.toBlob(b => b ? resolve(b) : reject(new Error('blob failed')), 'image/png');
+            } catch(err) { reject(err); }
+          };
+          img.src = e.target.result;
+        };
+        reader.readAsDataURL(file);
+      });
+    }
+
+    async function runAll() {
+      if (!files.length) return;
+      const btnRun = document.getElementById('btn-run');
+      btnRun.disabled = true;
+      document.getElementById('btn-zip').disabled = true;
+      document.getElementById('progress-wrap').style.display = 'block';
+      document.getElementById('summary').textContent = 'processing...';
+
+      const thresh = parseInt(document.getElementById('thresh').value);
+      const method = document.getElementById('method').value;
+      totalFiles = files.length;
+      let done = 0, errs = 0;
+
+      for (let i = 0; i < files.length; i++) {
+        currentFileIndex = i;
+        const f = files[i];
+        const k = key(f);
+        results[k] = 'processing';
+        fileProgress[k] = 0;
+        renderList();
+        try {
+          blobs[k] = await processFile(f, thresh, method, pct => updateFileProgress(k, pct));
+          results[k] = 'done';
+          fileProgress[k] = 100;
+          done++;
+        } catch(e) {
+          results[k] = 'error';
+          errs++;
+        }
+        document.getElementById('pfill').style.width = Math.round(((i + 1) / files.length) * 100) + '%';
+        renderList();
+      }
+
+      btnRun.disabled = false;
+      document.getElementById('summary').textContent =
+        done + ' image' + (done === 1 ? '' : 's') + ' cleaned' +
+        (errs ? ' · ' + errs + ' error' + (errs > 1 ? 's' : '') : '');
+      if (done > 0) document.getElementById('btn-zip').disabled = false;
+    }
+
+    async function downloadZip() {
+      const btn = document.getElementById('btn-zip');
+      btn.disabled = true;
+      btn.textContent = 'zipping...';
+      document.getElementById('summary').textContent = 'building ZIP archive...';
+      try {
+        const zip = new JSZip();
+        for (const f of files) {
+          const b = blobs[key(f)];
+          if (!b) continue;
+          const base = f.name.replace(/\.[^.]+$/, '');
+          zip.file(base + '.png', b);
+        }
+        const content = await zip.generateAsync({
+          type: 'blob',
+          compression: 'DEFLATE',
+          compressionOptions: { level: 6 }
+        });
+        const url = URL.createObjectURL(content);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = 'cleaned_images.zip';
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        setTimeout(() => URL.revokeObjectURL(url), 5000);
+        document.getElementById('summary').textContent =
+          'ZIP downloaded — original filenames preserved as PNG';
+      } catch(e) {
+        document.getElementById('summary').textContent = 'ZIP error: ' + e.message;
+      }
+      btn.disabled = false;
+      btn.textContent = 'download ZIP';
+    }
+  </script>
+</body>
+</html>
