@@ -294,9 +294,9 @@
           <svg style="width:13px;height:13px;display:inline;vertical-align:-2px;margin-right:5px" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="5 3 19 12 5 21 5 3"/></svg>
           process all
         </button>
-        <button id="btn-zip" onclick="downloadZip()" disabled>
+        <button id="btn-zip" onclick="downloadFiles()" disabled>
           <svg style="width:13px;height:13px;display:inline;vertical-align:-2px;margin-right:5px" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
-          download ZIP
+          <span id="btn-zip-label">download</span>
         </button>
         <button onclick="clearAll()">clear all</button>
       </div>
@@ -428,7 +428,7 @@
           img.onerror = () => reject(new Error('image load failed'));
           img.onload = async () => {
             try {
-              const MAX = 1800;
+              const MAX = 2400;
               let w = img.width, h = img.height;
               if (w > MAX) { const r = MAX / w; w = MAX; h = Math.round(h * r); }
               const c = document.createElement('canvas');
@@ -441,55 +441,73 @@
               onProgress && onProgress(10);
               await yield_();
 
-              // --- Step 1: sample background color from a ring just outside
-              // the expected watermark zone (~9% corner of image).
-              const starSize = Math.round(Math.min(w, h) * 0.09);
-              const zoneX = method === 'bl' || method === 'tl' ? 0 : w - starSize;
-              const zoneY = method === 'tr' || method === 'tl' ? 0 : h - starSize;
-              const zoneX2 = method === 'bl' || method === 'tl' ? starSize : w;
-              const zoneY2 = method === 'tr' || method === 'tl' ? starSize : h;
+              // --- Step 1: define watermark zone (20% of shorter side).
+              const zoneSize = Math.round(Math.min(w, h) * 0.20);
+              const zoneX  = (method === 'bl' || method === 'tl') ? 0 : w - zoneSize;
+              const zoneY  = (method === 'tr' || method === 'tl') ? 0 : h - zoneSize;
+              const zoneX2 = zoneX + zoneSize;
+              const zoneY2 = zoneY + zoneSize;
 
-              // Sample background from a band just outside the zone
-              const samplePad = Math.round(starSize * 0.5);
+              // Sample background from strips just outside the zone.
+              const samplePad = Math.round(zoneSize * 0.6);
               let bgR = 0, bgG = 0, bgB = 0, bgCount = 0;
-              // Strip above/below the zone
-              const stripY1 = method === 'tr' || method === 'tl' ? zoneY2 : Math.max(0, zoneY - samplePad);
-              const stripY2 = method === 'tr' || method === 'tl' ? Math.min(h, zoneY2 + samplePad) : zoneY;
-              for (let y = stripY1; y < stripY2; y++) {
-                for (let x = zoneX; x < zoneX2; x++) {
-                  const i = (y * w + x) * 4;
-                  bgR += data[i]; bgG += data[i+1]; bgB += data[i+2]; bgCount++;
-                }
-              }
-              // Strip left/right of the zone
-              const stripX1 = method === 'bl' || method === 'tl' ? zoneX2 : Math.max(0, zoneX - samplePad);
-              const stripX2 = method === 'bl' || method === 'tl' ? Math.min(w, zoneX2 + samplePad) : zoneX;
-              for (let y = zoneY; y < zoneY2; y++) {
-                for (let x = stripX1; x < stripX2; x++) {
-                  const i = (y * w + x) * 4;
-                  bgR += data[i]; bgG += data[i+1]; bgB += data[i+2]; bgCount++;
-                }
-              }
-              if (bgCount === 0) { bgR = bgG = bgB = 0; bgCount = 1; }
+
+              const addSample = (x, y) => {
+                if (x < 0 || x >= w || y < 0 || y >= h) return;
+                const idx = (y * w + x) * 4;
+                bgR += data[idx]; bgG += data[idx+1]; bgB += data[idx+2]; bgCount++;
+              };
+
+              // horizontal strip (above or below zone)
+              const hStripY1 = (method === 'tr' || method === 'tl') ? zoneY2 : Math.max(0, zoneY - samplePad);
+              const hStripY2 = (method === 'tr' || method === 'tl') ? Math.min(h, zoneY2 + samplePad) : zoneY;
+              for (let y = hStripY1; y < hStripY2; y++)
+                for (let x = zoneX; x < zoneX2; x++) addSample(x, y);
+
+              // vertical strip (left or right of zone)
+              const vStripX1 = (method === 'bl' || method === 'tl') ? zoneX2 : Math.max(0, zoneX - samplePad);
+              const vStripX2 = (method === 'bl' || method === 'tl') ? Math.min(w, zoneX2 + samplePad) : zoneX;
+              for (let y = zoneY; y < zoneY2; y++)
+                for (let x = vStripX1; x < vStripX2; x++) addSample(x, y);
+
+              if (bgCount === 0) { bgR = 128; bgG = 128; bgB = 128; bgCount = 1; }
               const avgBgR = bgR / bgCount;
               const avgBgG = bgG / bgCount;
               const avgBgB = bgB / bgCount;
+              const bgLum  = 0.299 * avgBgR + 0.587 * avgBgG + 0.114 * avgBgB;
 
               onProgress && onProgress(25);
               await yield_();
 
-              // --- Step 2: build mask inside the zone.
+              // --- Step 2: build mask.
+              // sensitivity: thresh slider (5-80) maps to a pixel-distance threshold.
+              // Lower thresh → more aggressive (catches faint watermarks).
+              const distThresh = Math.max(8, 55 - thresh);  // e.g. thresh=30 → distThresh=25
               const mask = new Uint8Array(w * h);
-              const brightnessThresh = 40 + thresh;
 
               for (let y = zoneY; y < zoneY2; y++) {
                 for (let x = zoneX; x < zoneX2; x++) {
                   const i = (y * w + x) * 4;
                   const r = data[i], g = data[i+1], b = data[i+2];
-                  const diffFromBg = ((r - avgBgR) + (g - avgBgG) + (b - avgBgB)) / 3;
+
+                  // Euclidean RGB distance from background (fixes the signed-average bug)
+                  const eucDist = Math.sqrt(
+                    (r - avgBgR) ** 2 + (g - avgBgG) ** 2 + (b - avgBgB) ** 2
+                  );
+
+                  // Luminance of this pixel
+                  const lum = 0.299 * r + 0.587 * g + 0.114 * b;
+                  const lumDiff = lum - bgLum; // positive = brighter than background
+
+                  // Saturation (chroma spread)
                   const maxC = Math.max(r, g, b), minC = Math.min(r, g, b);
-                  const saturation = maxC - minC;
-                  if (diffFromBg > brightnessThresh && saturation < 60) {
+                  const sat  = maxC - minC;
+
+                  // Mark as watermark if:
+                  //   (a) colour clearly differs from background AND relatively desaturated, OR
+                  //   (b) pixel is distinctly brighter than background (white/light watermark)
+                  if ((eucDist > distThresh && sat < 90) ||
+                      (lumDiff > distThresh * 1.2 && sat < 110)) {
                     mask[y * w + x] = 1;
                   }
                 }
@@ -498,16 +516,17 @@
               onProgress && onProgress(50);
               await yield_();
 
-              // --- Step 3: dilate mask by 2px
-              const mask2 = new Uint8Array(mask);
-              const dilate = 2;
+              // --- Step 3: dilate mask by 3px to cover anti-aliased edges.
+              const mask2  = new Uint8Array(mask);
+              const dilate = 3;
               for (let y = zoneY; y < zoneY2; y++) {
                 for (let x = zoneX; x < zoneX2; x++) {
                   if (!mask[y * w + x]) continue;
                   for (let dy = -dilate; dy <= dilate; dy++) {
                     for (let dx = -dilate; dx <= dilate; dx++) {
                       const ny = y + dy, nx = x + dx;
-                      if (ny >= zoneY && ny < zoneY2 && nx >= zoneX && nx < zoneX2) mask2[ny * w + nx] = 1;
+                      if (ny >= zoneY && ny < zoneY2 && nx >= zoneX && nx < zoneX2)
+                        mask2[ny * w + nx] = 1;
                     }
                   }
                 }
@@ -516,12 +535,12 @@
               onProgress && onProgress(65);
               await yield_();
 
-              // --- Step 4: fill masked pixels with local background sample
-              const sr = 12;
+              // --- Step 4: fill masked pixels via local neighbourhood inpainting.
+              const sr = 16;
               for (let y = zoneY; y < zoneY2; y++) {
-                if (y % 30 === 0) {
+                if (y % 20 === 0) {
                   await yield_();
-                  const pct = 65 + Math.round(((y - zoneY) / starSize) * 30);
+                  const pct = 65 + Math.round(((y - zoneY) / zoneSize) * 30);
                   onProgress && onProgress(Math.min(95, pct));
                 }
                 for (let x = zoneX; x < zoneX2; x++) {
@@ -531,21 +550,15 @@
                     for (let dx = -sr; dx <= sr; dx++) {
                       const ny = y + dy, nx = x + dx;
                       if (ny < 0 || ny >= h || nx < 0 || nx >= w) continue;
-                      if (mask2[ny * w + nx]) continue;
+                      if (mask2[ny * w + nx]) continue;  // skip other masked pixels
                       const ni = (ny * w + nx) * 4;
                       rS += data[ni]; gS += data[ni+1]; bS += data[ni+2]; cnt++;
                     }
                   }
                   const i = (y * w + x) * 4;
-                  if (cnt > 0) {
-                    data[i]   = Math.round(rS / cnt);
-                    data[i+1] = Math.round(gS / cnt);
-                    data[i+2] = Math.round(bS / cnt);
-                  } else {
-                    data[i]   = Math.round(avgBgR);
-                    data[i+1] = Math.round(avgBgG);
-                    data[i+2] = Math.round(avgBgB);
-                  }
+                  data[i]   = cnt > 0 ? Math.round(rS / cnt) : Math.round(avgBgR);
+                  data[i+1] = cnt > 0 ? Math.round(gS / cnt) : Math.round(avgBgG);
+                  data[i+2] = cnt > 0 ? Math.round(bS / cnt) : Math.round(avgBgB);
                 }
               }
 
@@ -597,42 +610,67 @@
       document.getElementById('summary').textContent =
         done + ' image' + (done === 1 ? '' : 's') + ' cleaned' +
         (errs ? ' · ' + errs + ' error' + (errs > 1 ? 's' : '') : '');
-      if (done > 0) document.getElementById('btn-zip').disabled = false;
+      if (done > 0) {
+        document.getElementById('btn-zip').disabled = false;
+        // Update label based on how many images processed
+        const doneCount = files.filter(f => blobs[key(f)]).length;
+        document.getElementById('btn-zip-label').textContent =
+          doneCount === 1 ? 'download PNG' : 'download ZIP';
+      }
     }
 
-    async function downloadZip() {
+    async function downloadFiles() {
+      const doneFiles = files.filter(f => blobs[key(f)]);
+      if (!doneFiles.length) return;
+
       const btn = document.getElementById('btn-zip');
       btn.disabled = true;
-      btn.textContent = 'zipping...';
-      document.getElementById('summary').textContent = 'building ZIP archive...';
-      try {
-        const zip = new JSZip();
-        for (const f of files) {
-          const b = blobs[key(f)];
-          if (!b) continue;
-          const base = f.name.replace(/\.[^.]+$/, '');
-          zip.file(base + '.png', b);
-        }
-        const content = await zip.generateAsync({
-          type: 'blob',
-          compression: 'DEFLATE',
-          compressionOptions: { level: 6 }
-        });
-        const url = URL.createObjectURL(content);
+
+      if (doneFiles.length === 1) {
+        // Single image — download directly as PNG
+        const f = doneFiles[0];
+        const url = URL.createObjectURL(blobs[key(f)]);
         const a = document.createElement('a');
         a.href = url;
-        a.download = 'cleaned_images.zip';
+        a.download = f.name.replace(/\.[^.]+$/, '') + '.png';
         document.body.appendChild(a);
         a.click();
         document.body.removeChild(a);
         setTimeout(() => URL.revokeObjectURL(url), 5000);
-        document.getElementById('summary').textContent =
-          'ZIP downloaded — original filenames preserved as PNG';
-      } catch(e) {
-        document.getElementById('summary').textContent = 'ZIP error: ' + e.message;
+        document.getElementById('summary').textContent = 'PNG downloaded';
+      } else {
+        // Multiple images — ZIP
+        const lbl = document.getElementById('btn-zip-label');
+        lbl.textContent = 'zipping...';
+        document.getElementById('summary').textContent = 'building ZIP archive...';
+        try {
+          const zip = new JSZip();
+          for (const f of doneFiles) {
+            const base = f.name.replace(/\.[^.]+$/, '');
+            zip.file(base + '.png', blobs[key(f)]);
+          }
+          const content = await zip.generateAsync({
+            type: 'blob',
+            compression: 'DEFLATE',
+            compressionOptions: { level: 6 }
+          });
+          const url = URL.createObjectURL(content);
+          const a = document.createElement('a');
+          a.href = url;
+          a.download = 'cleaned_images.zip';
+          document.body.appendChild(a);
+          a.click();
+          document.body.removeChild(a);
+          setTimeout(() => URL.revokeObjectURL(url), 5000);
+          document.getElementById('summary').textContent =
+            'ZIP downloaded — original filenames preserved as PNG';
+        } catch(e) {
+          document.getElementById('summary').textContent = 'ZIP error: ' + e.message;
+        }
+        document.getElementById('btn-zip-label').textContent = 'download ZIP';
       }
+
       btn.disabled = false;
-      btn.textContent = 'download ZIP';
     }
   </script>
 </body>
