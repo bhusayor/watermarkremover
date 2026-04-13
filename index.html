@@ -266,14 +266,12 @@
     <!-- Options -->
     <div class="opts">
       <div class="opt-group">
-        <span class="opt-label">method</span>
+        <span class="opt-label">watermark corner</span>
         <select id="method">
-          <option value="auto">auto-detect</option>
-          <option value="br">bottom-right</option>
+          <option value="br">bottom-right (default)</option>
           <option value="bl">bottom-left</option>
           <option value="tr">top-right</option>
           <option value="tl">top-left</option>
-          <option value="full">full scan</option>
         </select>
       </div>
       <div class="opt-group">
@@ -440,67 +438,114 @@
               const imgData = ctx.getImageData(0, 0, w, h);
               const data = imgData.data;
 
-              const regions = [];
-              if (method === 'auto' || method === 'br') regions.push([Math.floor(w*.5), Math.floor(h*.75), w, h]);
-              if (method === 'auto' || method === 'bl') regions.push([0, Math.floor(h*.75), Math.floor(w*.5), h]);
-              if (method === 'auto' || method === 'tr') regions.push([Math.floor(w*.5), 0, w, Math.floor(h*.25)]);
-              if (method === 'auto' || method === 'tl') regions.push([0, 0, Math.floor(w*.5), Math.floor(h*.25)]);
-              if (method === 'full') regions.push([0, 0, w, h]);
+              onProgress && onProgress(10);
+              await yield_();
 
-              const totalRows = regions.reduce((s,[,y0,,y1])=>s+(y1-y0),0) * 2;
-              let rowsDone = 0;
+              // --- Step 1: sample background color from a ring just outside
+              // the expected watermark zone (~9% corner of image).
+              const starSize = Math.round(Math.min(w, h) * 0.09);
+              const zoneX = method === 'bl' || method === 'tl' ? 0 : w - starSize;
+              const zoneY = method === 'tr' || method === 'tl' ? 0 : h - starSize;
+              const zoneX2 = method === 'bl' || method === 'tl' ? starSize : w;
+              const zoneY2 = method === 'tr' || method === 'tl' ? starSize : h;
 
-              for (const [x0, y0, x1, y1] of regions) {
-                const mask = new Uint8Array(w * h);
-                for (let y = y0; y < y1; y++) {
-                  if (y % 50 === 0) { await yield_(); onProgress && onProgress(Math.min(99, Math.round(rowsDone/totalRows*100))); }
-                  for (let x = x0; x < x1; x++) {
-                    const idx = (y * w + x) * 4;
-                    const r = data[idx], g = data[idx+1], b = data[idx+2], a = data[idx+3];
-                    if (a < 200) continue;
-                    const bright = (r + g + b) / 3;
-                    const diff = Math.max(Math.abs(r-g), Math.abs(g-b), Math.abs(r-b));
-                    if (bright > 255 - thresh && diff < thresh) mask[y * w + x] = 1;
-                  }
-                  rowsDone++;
+              // Sample background from a band just outside the zone
+              const samplePad = Math.round(starSize * 0.5);
+              let bgR = 0, bgG = 0, bgB = 0, bgCount = 0;
+              // Strip above/below the zone
+              const stripY1 = method === 'tr' || method === 'tl' ? zoneY2 : Math.max(0, zoneY - samplePad);
+              const stripY2 = method === 'tr' || method === 'tl' ? Math.min(h, zoneY2 + samplePad) : zoneY;
+              for (let y = stripY1; y < stripY2; y++) {
+                for (let x = zoneX; x < zoneX2; x++) {
+                  const i = (y * w + x) * 4;
+                  bgR += data[i]; bgG += data[i+1]; bgB += data[i+2]; bgCount++;
                 }
+              }
+              // Strip left/right of the zone
+              const stripX1 = method === 'bl' || method === 'tl' ? zoneX2 : Math.max(0, zoneX - samplePad);
+              const stripX2 = method === 'bl' || method === 'tl' ? Math.min(w, zoneX2 + samplePad) : zoneX;
+              for (let y = zoneY; y < zoneY2; y++) {
+                for (let x = stripX1; x < stripX2; x++) {
+                  const i = (y * w + x) * 4;
+                  bgR += data[i]; bgG += data[i+1]; bgB += data[i+2]; bgCount++;
+                }
+              }
+              if (bgCount === 0) { bgR = bgG = bgB = 0; bgCount = 1; }
+              const avgBgR = bgR / bgCount;
+              const avgBgG = bgG / bgCount;
+              const avgBgB = bgB / bgCount;
 
-                const mask2 = new Uint8Array(mask);
-                const rad = 3;
-                for (let y = y0; y < y1; y++) {
-                  for (let x = x0; x < x1; x++) {
-                    if (!mask[y * w + x]) continue;
-                    for (let dy = -rad; dy <= rad; dy++) {
-                      for (let dx = -rad; dx <= rad; dx++) {
-                        const ny = y + dy, nx = x + dx;
-                        if (ny >= 0 && ny < h && nx >= 0 && nx < w) mask2[ny * w + nx] = 1;
-                      }
+              onProgress && onProgress(25);
+              await yield_();
+
+              // --- Step 2: build mask inside the zone.
+              const mask = new Uint8Array(w * h);
+              const brightnessThresh = 40 + thresh;
+
+              for (let y = zoneY; y < zoneY2; y++) {
+                for (let x = zoneX; x < zoneX2; x++) {
+                  const i = (y * w + x) * 4;
+                  const r = data[i], g = data[i+1], b = data[i+2];
+                  const diffFromBg = ((r - avgBgR) + (g - avgBgG) + (b - avgBgB)) / 3;
+                  const maxC = Math.max(r, g, b), minC = Math.min(r, g, b);
+                  const saturation = maxC - minC;
+                  if (diffFromBg > brightnessThresh && saturation < 60) {
+                    mask[y * w + x] = 1;
+                  }
+                }
+              }
+
+              onProgress && onProgress(50);
+              await yield_();
+
+              // --- Step 3: dilate mask by 2px
+              const mask2 = new Uint8Array(mask);
+              const dilate = 2;
+              for (let y = zoneY; y < zoneY2; y++) {
+                for (let x = zoneX; x < zoneX2; x++) {
+                  if (!mask[y * w + x]) continue;
+                  for (let dy = -dilate; dy <= dilate; dy++) {
+                    for (let dx = -dilate; dx <= dilate; dx++) {
+                      const ny = y + dy, nx = x + dx;
+                      if (ny >= zoneY && ny < zoneY2 && nx >= zoneX && nx < zoneX2) mask2[ny * w + nx] = 1;
                     }
                   }
                 }
+              }
 
-                const sr = Math.max(1, Math.min(20, Math.floor(thresh / 3)));
-                for (let y = y0; y < y1; y++) {
-                  if (y % 50 === 0) { await yield_(); onProgress && onProgress(Math.min(99, Math.round(rowsDone/totalRows*100))); }
-                  for (let x = x0; x < x1; x++) {
-                    if (!mask2[y * w + x]) continue;
-                    let rS = 0, gS = 0, bS = 0, cnt = 0;
-                    for (let dy = -sr; dy <= sr; dy++) {
-                      for (let dx = -sr; dx <= sr; dx++) {
-                        const ny = y + dy, nx = x + dx;
-                        if (ny < 0 || ny >= h || nx < 0 || nx >= w || mask2[ny * w + nx]) continue;
-                        const ni = (ny * w + nx) * 4;
-                        rS += data[ni]; gS += data[ni+1]; bS += data[ni+2]; cnt++;
-                      }
-                    }
-                    if (cnt) {
-                      const idx = (y * w + x) * 4;
-                      data[idx]   = Math.round(rS / cnt);
-                      data[idx+1] = Math.round(gS / cnt);
-                      data[idx+2] = Math.round(bS / cnt);
+              onProgress && onProgress(65);
+              await yield_();
+
+              // --- Step 4: fill masked pixels with local background sample
+              const sr = 12;
+              for (let y = zoneY; y < zoneY2; y++) {
+                if (y % 30 === 0) {
+                  await yield_();
+                  const pct = 65 + Math.round(((y - zoneY) / starSize) * 30);
+                  onProgress && onProgress(Math.min(95, pct));
+                }
+                for (let x = zoneX; x < zoneX2; x++) {
+                  if (!mask2[y * w + x]) continue;
+                  let rS = 0, gS = 0, bS = 0, cnt = 0;
+                  for (let dy = -sr; dy <= sr; dy++) {
+                    for (let dx = -sr; dx <= sr; dx++) {
+                      const ny = y + dy, nx = x + dx;
+                      if (ny < 0 || ny >= h || nx < 0 || nx >= w) continue;
+                      if (mask2[ny * w + nx]) continue;
+                      const ni = (ny * w + nx) * 4;
+                      rS += data[ni]; gS += data[ni+1]; bS += data[ni+2]; cnt++;
                     }
                   }
-                  rowsDone++;
+                  const i = (y * w + x) * 4;
+                  if (cnt > 0) {
+                    data[i]   = Math.round(rS / cnt);
+                    data[i+1] = Math.round(gS / cnt);
+                    data[i+2] = Math.round(bS / cnt);
+                  } else {
+                    data[i]   = Math.round(avgBgR);
+                    data[i+1] = Math.round(avgBgG);
+                    data[i+2] = Math.round(avgBgB);
+                  }
                 }
               }
 
